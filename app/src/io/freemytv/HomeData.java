@@ -23,6 +23,7 @@ import java.text.NumberFormat;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.SimpleTimeZone;
@@ -31,13 +32,14 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * Optional crypto prices (Binance, every 5 min) and weather/sunrise/sunset (Open-Meteo, every 30 min), cached
+ * Optional market prices (Binance, or Chilean dollar and UF) and weather/sunrise/sunset (Open-Meteo, every 30 min), cached
  * so the screen opens with numbers. Only fetched while the home screen or the screensaver is visible (the screen asks).
  * Neither source needs a key. Location and currency come from config.properties.
  */
 final class HomeData {
-    static final String[] COINS = {"BTC", "ETH", "SOL", "USDT"};
-    static final String[] COIN_NAMES = {"Bitcoin", "Ethereum", "Solana", "Dollar"};
+    static final boolean IS_CLP = "CLP".equals(Place.currency());
+    static final String[] COINS = IS_CLP ? new String[] {"USD", "UF"} : new String[] {"BTC", "ETH", "SOL", "USDT"};
+    static final String[] COIN_NAMES = IS_CLP ? new String[] {"Dollar", "UF"} : new String[] {"Bitcoin", "Ethereum", "Solana", "Dollar"};
     private static final String CURRENCY = Place.currency();
     /** Binance has no pairs in some currencies (INR...) and then refuses the whole request: prices go in dollars instead. */
     private static volatile boolean inDollars;
@@ -58,7 +60,7 @@ final class HomeData {
     private static String weatherUrl() {
         return "https://api.open-meteo.com/v1/forecast?latitude=" + Prefs.latitude() + "&longitude=" + Prefs.longitude() + WEATHER_QUERY;
     }
-    private static final long PRICES_EVERY = 5 * 60_000L, WEATHER_EVERY = 30 * 60_000L;
+    private static final long PRICES_EVERY = 5 * 60_000L, WEATHER_EVERY = 30 * 60_000L, UF_EVERY = 6 * 60 * 60_000L;
     interface Listener { void onData(); }
 
     /** BTC, ETH and SOL; in Brazilian reais also the dollar (USDT/BRL), which Binance doesn't list for most currencies. */
@@ -77,8 +79,9 @@ final class HomeData {
         if (a != null && activeVersion == Prefs.version && activeInDollars == dollars) return a;
         int n = 0;
         int[] tmp = new int[COINS.length];
-        // The dollar only in reais, not in dollars: USDTUSDT isn't a pair, and Binance would refuse the whole request.
-        for (int i = 0; i < COINS.length; i++) if (Prefs.coin(i) && (i < 3 || CURRENCY.equals("BRL") && !dollars)) tmp[n++] = i;
+        for (int i = 0; i < COINS.length; i++) {
+            if (IS_CLP ? Prefs.quote(COINS[i]) : Prefs.coin(i) && (i < 3 || CURRENCY.equals("BRL") && !dollars)) tmp[n++] = i;
+        }
         a = java.util.Arrays.copyOf(tmp, n);
         activeCoins = a;
         activeVersion = Prefs.version;
@@ -95,7 +98,13 @@ final class HomeData {
     }
 
     static String coinName(int i) {
-        return i == 3 ? Ui.tr("Dollar") : COIN_NAMES[i];
+        return "Dollar".equals(COIN_NAMES[i]) ? Ui.tr("Dollar") : COIN_NAMES[i];
+    }
+
+    static boolean coinEnabled(int i) { return IS_CLP ? Prefs.quote(COINS[i]) : Prefs.coin(i); }
+
+    static void setCoinEnabled(int i, boolean on) {
+        if (IS_CLP) Prefs.setQuote(COINS[i], on); else Prefs.setCoin(i, on);
     }
 
     /**
@@ -158,10 +167,10 @@ final class HomeData {
         return instance;
     }
 
-    final double[] prices = {Double.NaN, Double.NaN, Double.NaN, Double.NaN};
+    final double[] prices = new double[COINS.length];
     /** 24 h change (%), in the same order. */
-    final double[] changes = {Double.NaN, Double.NaN, Double.NaN, Double.NaN};
-    volatile long pricesAt, weatherAt;
+    final double[] changes = new double[COINS.length];
+    volatile long pricesAt, weatherAt, ufAt;
     volatile Weather weather = new Weather();
 
     private final SharedPreferences cache;
@@ -174,13 +183,24 @@ final class HomeData {
     private volatile String weatherFor = "";
 
     private HomeData(Context c) {
+        Arrays.fill(prices, Double.NaN);
+        Arrays.fill(changes, Double.NaN);
         cache = c.getSharedPreferences("homedata", Context.MODE_PRIVATE);
         inDollars = CURRENCY.equals(cache.getString("dollarsFor", ""));
         try {
             if (Prefs.quotes()) {
-                String p = cache.getString("prices", null);
-                if (p != null) parsePrices(p);
-                pricesAt = cache.getLong("pricesAt", 0);
+                if (IS_CLP) {
+                    prices[0] = Double.parseDouble(cache.getString("cl_dolar", "NaN"));
+                    changes[0] = Double.parseDouble(cache.getString("cl_dolar_chg", "NaN"));
+                    prices[1] = Double.parseDouble(cache.getString("cl_uf", "NaN"));
+                    changes[1] = Double.parseDouble(cache.getString("cl_uf_chg", "NaN"));
+                    pricesAt = cache.getLong("pricesAt", 0);
+                    ufAt = cache.getLong("cl_uf_at", 0);
+                } else {
+                    String p = cache.getString("prices", null);
+                    if (p != null) parsePrices(p);
+                    pricesAt = cache.getLong("pricesAt", 0);
+                }
             }
             String w = cache.getString("weather", null);
             // The cached forecast is for the city it was fetched for; another city means fetch again.
@@ -218,6 +238,17 @@ final class HomeData {
             fetchingPrices = true;
             io.execute(() -> {
                 try {
+                    if (IS_CLP) {
+                        fetchChilePrices(now);
+                        pricesAt = System.currentTimeMillis();
+                        cache.edit().putString("cl_dolar", String.valueOf(prices[0]))
+                                .putString("cl_dolar_chg", String.valueOf(changes[0]))
+                                .putString("cl_uf", String.valueOf(prices[1]))
+                                .putString("cl_uf_chg", String.valueOf(changes[1]))
+                                .putLong("cl_uf_at", ufAt).putLong("pricesAt", pricesAt).apply();
+                        notifyListeners();
+                        return;
+                    }
                     String body;
                     try {
                         body = getPrices();
@@ -275,6 +306,35 @@ final class HomeData {
 
     private void notifyListeners() {
         main.post(() -> { for (Listener l : new ArrayList<>(listeners)) l.onData(); });
+    }
+
+    private void fetchChilePrices(long now) {
+        try {
+            JSONObject o = new JSONObject(get("https://cl.dolarapi.com/v1/cotizaciones/usd"));
+            double sale = o.optDouble("venta", o.optDouble("valor", Double.NaN));
+            double close = o.optDouble("ultimoCierre", Double.NaN);
+            prices[0] = sale;
+            changes[0] = sale >= 0 && close > 0 ? (sale - close) / close * 100 : Double.NaN;
+        } catch (Exception e) {
+            AppLog.w("chile dolar: " + e.getMessage());
+        }
+
+        if (Double.isNaN(prices[1]) || now - ufAt > UF_EVERY || now < ufAt) {
+            try {
+                JSONArray series = new JSONObject(get("https://findic.cl/api/uf")).optJSONArray("serie");
+                if (series != null && series.length() > 0) {
+                    double today = series.getJSONObject(0).optDouble("valor", Double.NaN);
+                    prices[1] = today;
+                    if (series.length() > 1) {
+                        double yesterday = series.getJSONObject(1).optDouble("valor", Double.NaN);
+                        changes[1] = today > 0 && yesterday > 0 ? (today - yesterday) / yesterday * 100 : Double.NaN;
+                    } else changes[1] = Double.NaN;
+                    ufAt = now;
+                }
+            } catch (Exception e) {
+                AppLog.w("chile uf: " + e.getMessage());
+            }
+        }
     }
 
     /**
@@ -439,6 +499,7 @@ final class HomeData {
     /** 4.15M · 416.3k · 12.2k · 1.04k · 531 · 5.05: abbreviated, for the price row on the home screen. */
     static String compact(double v) {
         if (Double.isNaN(v)) return "—";
+        if (IS_CLP) return "$" + NumberFormat.getIntegerInstance(new Locale("es", "CL")).format(Math.round(v));
         if (v >= 1_000_000) return String.format(locale(), "%.2fM", v / 1_000_000);   // Bitcoin in rubles…
         if (v >= 10_000) return String.format(locale(), "%.1fk", v / 1000);
         if (v >= 1000) return String.format(locale(), "%.2fk", v / 1000);
@@ -451,6 +512,10 @@ final class HomeData {
      * symbol and spaces where the language puts them.
      */
     static String brl(double v) {
+        if (IS_CLP) {
+            if (Double.isNaN(v)) return "$—";
+            return "$" + NumberFormat.getIntegerInstance(new Locale("es", "CL")).format(Math.round(v));
+        }
         String symbol = currencySymbol();
         if (Double.isNaN(v)) return symbol + "—";
         return Ui.once("brl", v, () -> {
