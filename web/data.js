@@ -50,7 +50,7 @@ var Place = (function () {
     lon: set ? CONFIG.longitude : tz ? tz.lon : '-74.0060',
     city: CONFIG.city || (!set && tz ? tz.name : ''),
     country: country,
-    currency: (CONFIG.currency || (country === 'BR' ? 'BRL' : EURO.test(country) ? 'EUR' : 'USD')).toUpperCase(),
+    currency: (CONFIG.currency || (country === 'BR' ? 'BRL' : country === 'CL' ? 'CLP' : EURO.test(country) ? 'EUR' : 'USD')).toUpperCase(),
     /** Fahrenheit for TVs in the US (by their time zone, or their language when it doesn't tell). */
     fahrenheit: tz ? tz.country === 'US' : /-US$/i.test(navigator.language || '')
   };
@@ -78,7 +78,10 @@ var Prefs = (function () {
     /** The weather card's forecast: 'hours' (the next 6 hours) or 'days' (the next 5 days). */
     forecast: function () { return pick('forecast', 'hours') === 'days' ? 'days' : 'hours'; },
     quotes: function () { return pick('quotes', CONFIG.showCrypto !== false); },
-    coin: function (i) { var c = pick('coins', null); return c ? c[i] !== false : true; },
+    coin: function (i) {
+      var c = Place.currency === 'CLP' ? pick('clQuotes', null) : pick('coins', null);
+      return c ? c[i] !== false : true;
+    },
     /** Picks per tab: 3 (as it was) up to 6. */
     cards: function () { var n = pick('cards', 3); return n < 3 ? 3 : n > 6 ? 6 : n; },
     /** Cartoons and anime out of the picks (Home Settings), or config.properties' hide_animation. */
@@ -105,9 +108,10 @@ var Prefs = (function () {
     openPicks: function () { return pick('openPicks', CONFIG.openPicksIn === 'nuvio' ? 'nuvio' : 'apps'); },
     set: function (name, value) { v[name] = value; save(); this.version++; },
     setCoin: function (i, on) {
-      var c = (pick('coins', null) || [true, true, true, true]).slice();
+      var key = Place.currency === 'CLP' ? 'clQuotes' : 'coins';
+      var c = (pick(key, null) || [true, true, true, true]).slice();
       c[i] = on;
-      this.set('coins', c);
+      this.set(key, c);
     }
   };
 })();
@@ -240,7 +244,8 @@ var Data = (function () {
 
   // MARK: - Prices
 
-  var COINS = ['BTC', 'ETH', 'SOL', 'USDT'];
+  var IS_CLP = Place.currency === 'CLP';
+  var COINS = IS_CLP ? ['USD', 'UF'] : ['BTC', 'ETH', 'SOL', 'USDT'];
   var CURRENCY = Place.currency;
   var QUOTE = CURRENCY === 'USD' ? 'USDT' : CURRENCY;
   /** Binance refuses the whole request when it has no pairs in the currency (INR...): the prices go in dollars then. */
@@ -254,17 +259,31 @@ var Data = (function () {
     for (var i = 0; list && i < list.length; i++) if (list[i].closeTime > 0 && Date.now() - list[i].closeTime > 864e5) return true;
     return false;
   }
-  if (stored('dollarsFor') === CURRENCY && CURRENCY !== 'USD') {
+  if (!IS_CLP && stored('dollarsFor') === CURRENCY && CURRENCY !== 'USD') {
     CURRENCY = 'USD';
     QUOTE = 'USDT';
   }
-  var prices = [NaN, NaN, NaN, NaN], changes = [NaN, NaN, NaN, NaN], pricesAt = 0, fetchingPrices = false;
+  var prices = [], changes = [], pricesAt = 0, ufAt = 0, fetchingPrices = false;
+  for (var initPrice = 0; initPrice < COINS.length; initPrice++) { prices.push(NaN); changes.push(NaN); }
+
+  function numberOrNaN(value) { return typeof value === 'number' && isFinite(value) ? value : NaN; }
+  (function () {
+    if (!IS_CLP) return;
+    var cached = stored('clPrices');
+    if (!cached) return;
+    prices[0] = numberOrNaN(cached.dollar);
+    changes[0] = numberOrNaN(cached.dollarChange);
+    prices[1] = numberOrNaN(cached.uf);
+    changes[1] = numberOrNaN(cached.ufChange);
+    pricesAt = cached.at || 0;
+    ufAt = cached.ufAt || 0;
+  })();
 
   /** Indexes in COINS of the coins that are on (the dollar only in Brazilian reais, where Binance lists it). */
   function activeCoins() {
     var out = [];
     if (!Prefs.quotes()) return out;
-    for (var i = 0; i < COINS.length; i++) if (Prefs.coin(i) && (i < 3 || CURRENCY === 'BRL')) out.push(i);
+    for (var i = 0; i < COINS.length; i++) if (Prefs.coin(i) && (IS_CLP || i < 3 || CURRENCY === 'BRL')) out.push(i);
     return out;
   }
 
@@ -291,6 +310,41 @@ var Data = (function () {
     var coins = activeCoins(), now = Date.now();
     if (!coins.length || fetchingPrices || (now - pricesAt < 5 * 60000 && now >= pricesAt)) return;
     fetchingPrices = true;
+    if (IS_CLP) {
+      var needUF = isNaN(prices[1]) || now - ufAt > 6 * 60 * 60000 || now < ufAt;
+      var pending = needUF ? 2 : 1;
+      function savedOne() {
+        pending--;
+        if (pending) return;
+        fetchingPrices = false;
+        pricesAt = Date.now();
+        store('clPrices', {dollar: prices[0], dollarChange: changes[0], uf: prices[1], ufChange: changes[1], at: pricesAt, ufAt: ufAt});
+        changed();
+      }
+      get('https://cl.dolarapi.com/v1/cotizaciones/usd', {}, function (err, body) {
+        if (!err) {
+          var sale = Number(body.venta !== undefined ? body.venta : body.valor), close = Number(body.ultimoCierre);
+          if (sale > 0) {
+            prices[0] = sale;
+            changes[0] = close > 0 ? (sale - close) / close * 100 : NaN;
+          }
+        }
+        savedOne();
+      });
+      if (needUF) get('https://findic.cl/api/uf', {}, function (err, body) {
+        var series = !err && body && body.serie;
+        if (series && series.length) {
+          var today = Number(series[0].valor), yesterday = series.length > 1 ? Number(series[1].valor) : NaN;
+          if (today > 0) {
+            prices[1] = today;
+            changes[1] = yesterday > 0 ? (today - yesterday) / yesterday * 100 : NaN;
+            ufAt = Date.now();
+          }
+        }
+        savedOne();
+      });
+      return;
+    }
     var symbols = coins.map(function (i) { return '%22' + COINS[i] + QUOTE + '%22'; }).join(',');
     var path = '/api/v3/ticker/24hr?type=MINI&symbols=%5B' + symbols + '%5D';
     // Binance.com refuses the US (HTTP 451); Binance.US answers the same call in dollars. data-api.binance.vision is
@@ -642,7 +696,9 @@ var Data = (function () {
     try { return v.toLocaleString(I18N.locale(), {minimumFractionDigits: digits, maximumFractionDigits: digits}); } catch (e) { return v.toFixed(digits); }
   }
 
-  var SYMBOLS = {USD: '$', BRL: 'R$ ', EUR: '€', GBP: '£', JPY: '¥'};
+  var SYMBOLS = {USD: '$', BRL: 'R$ ', EUR: '€', GBP: '£', JPY: '¥', CLP: '$'};
+
+  function clp(v) { return String(Math.round(v)).replace(/\B(?=(\d{3})+(?!\d))/g, '.'); }
 
   return {
     COINS: COINS,
@@ -686,6 +742,7 @@ var Data = (function () {
 
     compact: function (v) {
       if (isNaN(v)) return '—';
+      if (IS_CLP) return '$' + clp(v);
       if (v >= 1000000) return fmt(v / 1000000, 2) + 'M';
       if (v >= 10000) return fmt(v / 1000, 1) + 'k';
       if (v >= 1000) return fmt(v / 1000, 2) + 'k';
@@ -695,6 +752,7 @@ var Data = (function () {
     money: function (v) {
       var s = SYMBOLS[CURRENCY] || CURRENCY + ' ';
       if (isNaN(v)) return s + '—';
+      if (IS_CLP) return '$' + clp(v);
       return s + (v >= 1000 ? fmt(v, 0) : fmt(v, 2));
     },
     change: function (v) { return isNaN(v) ? '' : (v >= 0 ? '+' : '−') + fmt(Math.abs(v), 1) + '%'; },
@@ -743,6 +801,9 @@ var Data = (function () {
       if (code >= 95) return 'thunderstorm';
       return 'rainy';
     },
-    coinName: function (i) { return i === 3 ? tr('Dollar') : ['Bitcoin', 'Ethereum', 'Solana'][i]; }
+    coinName: function (i) {
+      if (IS_CLP) return i === 0 ? tr('Dollar') : 'UF';
+      return i === 3 ? tr('Dollar') : ['Bitcoin', 'Ethereum', 'Solana'][i];
+    }
   };
 })();

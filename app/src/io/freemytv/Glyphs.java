@@ -44,13 +44,27 @@ final class Glyphs {
         int slot = slot(coin), key = slot << 16 | frame;
         synchronized (BITMAPS) {
             if (BITMAPS.indexOfKey(key) >= 0) return BITMAPS.get(key);
-            Drawable d = context.getDrawable(IDS[slot]);
             Bitmap b = null;
-            if (d != null) {
+            if ("USD".equals(coin) || "UF".equals(coin)) {
+                Paint text = new Paint(Paint.ANTI_ALIAS_FLAG);
+                text.setColor(0xFFFFFFFF);
+                text.setTypeface(Ui.semibold);
+                text.setTextSize(frame * 0.72f);
+                float width = text.measureText(coin);
+                int bitmapWidth = Math.max(frame, Math.round(width + 8));
+                Bitmap full = Bitmap.createBitmap(bitmapWidth, frame, Bitmap.Config.ARGB_8888);
+                Canvas canvas = new Canvas(full);
+                Paint.FontMetrics metrics = text.getFontMetrics();
+                canvas.drawText(coin, (bitmapWidth - width) / 2f, (frame - metrics.ascent - metrics.descent) / 2f, text);
+                b = trimSides(full).extractAlpha();
+            } else {
+                Drawable d = context.getDrawable(IDS[slot]);
+                if (d != null) {
                 Bitmap full = Bitmap.createBitmap(frame, frame, Bitmap.Config.ARGB_8888);
                 d.setBounds(0, 0, frame, frame);
                 d.draw(new Canvas(full));
                 b = trimSides(full).extractAlpha();
+                }
             }
             BITMAPS.put(key, b);
             return b;
@@ -82,6 +96,8 @@ final class Glyphs {
             case "BTC": return 0;
             case "ETH": return 1;
             case "SOL": return 2;
+            case "USD": return 4;
+            case "UF": return 5;
             default: return 3;
         }
     }
