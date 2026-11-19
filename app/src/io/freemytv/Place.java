@@ -79,12 +79,12 @@ final class Place {
         return longitude;
     }
 
-    /** Prices in reais in Brazil, in euros in the euro area, else in dollars (as on LG and Samsung). */
+    /** Prices in reais in Brazil, UF and dollars in Chile, in euros in the euro area, else in dollars. */
     static String currency() {
         String v = Config.CURRENCY.trim().toUpperCase(Locale.ROOT);
         if (!v.isEmpty()) return v;
         load();
-        return country.equals("BR") ? "BRL" : EURO.matcher(country).matches() ? "EUR" : "USD";
+        return country.equals("BR") ? "BRL" : country.equals("CL") ? "CLP" : EURO.matcher(country).matches() ? "EUR" : "USD";
     }
 
     /** The picks' streaming region. */

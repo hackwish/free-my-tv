@@ -1025,10 +1025,14 @@ public class SettingsActivity extends Activity {
             l.add(Ui.tr("Now Playing widget"));
             if (HOME_ROW >= 0) l.add("Home Assistant");
             l.add(Ui.tr("Quotes widget"));
-            l.add("Bitcoin");
-            l.add("Ethereum");
-            l.add("Solana");
-            if (dollar()) l.add(Ui.tr("Dollar"));
+            if (HomeData.IS_CLP) {
+                for (int i = 0; i < HomeData.COINS.length; i++) l.add(HomeData.coinName(i));
+            } else {
+                l.add("Bitcoin");
+                l.add("Ethereum");
+                l.add("Solana");
+                if (dollar()) l.add(Ui.tr("Dollar"));
+            }
             l.add(Ui.tr("TMDB key"));
             l.add(Ui.tr("Watchmode key"));
             l.add(Ui.tr("Updates"));
@@ -1136,7 +1140,7 @@ public class SettingsActivity extends Activity {
             if (HOME_ROW >= 0) v[HOME_ROW] = onOff(HomeAssistant.on(getContext()));
             v[QUOTES_ROW] = onOff(Prefs.quotes());
             // No quotes widget, nowhere to show prices: the coins read as off (and stay locked) until it is back on.
-            for (int i = COIN_ROWS; i < v.length - 3; i++) v[i] = onOff(Prefs.quotes() && Prefs.coin(i - COIN_ROWS));
+            for (int i = COIN_ROWS; i < keyRow(); i++) v[i] = onOff(Prefs.quotes() && HomeData.coinEnabled(i - COIN_ROWS));
             v[v.length - 3] = keyValue(Recs.key());
             v[v.length - 2] = keyValue(Recs.watchmodeKey());
             v[v.length - 1] = updatesValue();
@@ -1543,7 +1547,7 @@ public class SettingsActivity extends Activity {
                 case QUOTES_ROW: Prefs.setQuotes(!Prefs.quotes()); break;
                 default:
                     if (row >= keyRow() || !Prefs.quotes()) return;   // the keys and Updates act on OK only
-                    Prefs.setCoin(row - COIN_ROWS, !Prefs.coin(row - COIN_ROWS));
+                    HomeData.setCoinEnabled(row - COIN_ROWS, !HomeData.coinEnabled(row - COIN_ROWS));
                     break;
             }
             HomeData.get(getContext()).settingsChanged();
